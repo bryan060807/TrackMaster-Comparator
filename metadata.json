@@ -1,0 +1,5 @@
+{
+  "name": "AIBRY TrackMaster Player",
+  "description": "A professional side-by-side audio comparison tool for mastering, featuring synchronized playback, A/B switching, and waveform visualization.",
+  "requestFramePermissions": []
+}
