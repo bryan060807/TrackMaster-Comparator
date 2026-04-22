@@ -19,12 +19,16 @@
 
 ---
 
-## 🚀 Deployment (Vercel)
-This app is optimized for Vercel. Because it uses the Web Audio API, it requires no backend and runs entirely on the client for maximum privacy and performance.
+## 🚀 Runtime Model
+TrackMaster-Comparator is a stateless browser app. It does not require a
+database, auth service, Fedora-hosted runtime dependency, or API secrets.
 
-1.  **Push** this repo to GitHub.
-2.  **Connect** the repo to Vercel.
-3.  **Deploy.** Vercel will automatically detect the Vite configuration.
+The Windows production runtime is:
+
+- build the Vite app into `dist/`
+- serve the static bundle with `server/static-server.mjs`
+- keep the process alive with PM2 as `trackmaster-comparator`
+- expose `0.0.0.0:8081` so the Fedora front-door proxy can reach Windows
 
 ---
 
@@ -36,22 +40,67 @@ This app is optimized for Vercel. Because it uses the Web Audio API, it requires
 
 2. **Install dependencies:**
 
- bash
-
- npm install
+```powershell
+npm install
+```
 
 3. **Run the development server:**
 
-Bash
-
+```powershell
 npm run dev
+```
 
 4. **Build for production:**
 
-Bash
-
+```powershell
 npm run build
+```
 
+## Windows Runtime
+
+For a Git-based deployment, make sure `server/static-server.mjs` is committed;
+`npm start` and PM2 both depend on it. The generated `dist/` bundle and
+`node_modules/` directory are intentionally ignored and should be recreated with
+`npm install` and `npm run build` on the Windows host.
+
+Start the Windows PM2 runtime:
+
+```powershell
+npm install
+npm run build
+npm run pm2:start
+npm run pm2:save
+```
+
+This uses `ecosystem.config.cjs`:
+
+- PM2 process name: `trackmaster-comparator`
+- Script: `server/static-server.mjs`
+- Host: `0.0.0.0`
+- Port: `8081`
+- Local validation URL: `http://127.0.0.1:8081`
+- Fedora/LAN upstream URL: `http://<windows-lan-ip>:8081`
+
+For a local-only manual run without PM2:
+
+```powershell
+npm run build
+$env:HOST = "127.0.0.1"
+$env:PORT = "8081"
+npm start
+```
+
+Validate PM2 and the static server:
+
+```powershell
+pm2 status trackmaster-comparator
+pm2 logs trackmaster-comparator --lines 50
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8081/).StatusCode
+```
+
+For public exposure through Fedora nginx, keep the Windows runtime on
+`0.0.0.0:8081`, allow inbound TCP `8081` through Windows Firewall for the
+Fedora host or LAN, and proxy Fedora nginx to `http://<windows-lan-ip>:8081`.
 
 
 🎛 How to Use

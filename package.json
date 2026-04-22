@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "start": "node server/static-server.mjs",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:save": "pm2 save",
     "preview": "vite preview",
     "lint": "tsc --noEmit"
   },
