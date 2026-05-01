@@ -1,10 +1,26 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HelpCircle, X } from 'lucide-react';
 import { useAudioEngine } from './hooks/useAudioEngine';
+import type { ComparatorMode } from './hooks/useAudioEngine';
 import { Fader } from './components/Fader';
 import { Display } from './components/Display';
 import { InputModule } from './components/InputModule';
 import { Transport } from './components/Transport';
+
+const readNumber = (key: string, fallback: number) => {
+  const value = Number(localStorage.getItem(key));
+  return Number.isFinite(value) ? value : fallback;
+};
+
+const readBoolean = (key: string, fallback = false) => {
+  const value = localStorage.getItem(key);
+  return value === null ? fallback : value === 'true';
+};
+
+const readMode = () => {
+  const value = localStorage.getItem('tm-mode');
+  return value === 'A' || value === 'B' || value === 'blend' || value === 'diff' ? value : 'A';
+};
 
 const Screw = ({ className }: { className?: string }) => (
   <div className={`absolute w-5 h-5 rounded-full bg-gradient-to-br from-zinc-300 to-zinc-500 border border-zinc-600 shadow-sm flex items-center justify-center ${className}`}>
@@ -16,28 +32,39 @@ export default function App() {
   // --- State Management ---
   const [trackAFile, setTrackAFile] = useState<File | null>(null);
   const [trackBFile, setTrackBFile] = useState<File | null>(null);
-  const [activeTrack, setActiveTrack] = useState<'A' | 'B'>('A');
+  const [mode, setMode] = useState<ComparatorMode>(() => readMode());
   const [showHelp, setShowHelp] = useState(false);
 
   // Audio Settings (Persisted)
-  const [trimA, setTrimA] = useState(() => Number(localStorage.getItem('tm-trimA')) || 0.8);
-  const [trimB, setTrimB] = useState(() => Number(localStorage.getItem('tm-trimB')) || 0.8);
-  const [nudgeB, setNudgeB] = useState(() => Number(localStorage.getItem('tm-nudgeB')) || 0);
+  const [trimA, setTrimA] = useState(() => readNumber('tm-trimA', 0.8));
+  const [trimB, setTrimB] = useState(() => readNumber('tm-trimB', 0.8));
+  const [nudgeB, setNudgeB] = useState(() => readNumber('tm-nudgeB', 0));
   const [volume, setVolume] = useState(0.8);
-  const [isMono, setIsMono] = useState(false);
-  const [isLooping, setIsLooping] = useState(false);
+  const [isMono, setIsMono] = useState(() => readBoolean('tm-isMono'));
+  const [isLooping, setIsLooping] = useState(() => readBoolean('tm-isLooping'));
+  const [invertA, setInvertA] = useState(() => readBoolean('tm-invertA'));
+  const [invertB, setInvertB] = useState(() => readBoolean('tm-invertB'));
+  const [matchLoudness, setMatchLoudness] = useState(() => readBoolean('tm-matchLoudness'));
+  const [blendAmount, setBlendAmount] = useState(() => readNumber('tm-blendAmount', 0.5));
+  const [loopStart, setLoopStart] = useState(() => readNumber('tm-loopStart', 0));
+  const [loopEnd, setLoopEnd] = useState<number | null>(() => {
+    const value = localStorage.getItem('tm-loopEnd');
+    if (value === null || value === '') return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  });
 
   // Audio Engine Hook
   const { 
     initEngine, 
-    wsARef, 
-    wsBRef, 
-    nodesRef,
-    audioCtxRef,
+    loadTrack,
+    configureComparator,
+    togglePlayback,
     isPlaying, 
-    setIsPlaying, 
     currentTime, 
-    analyzerData 
+    analyzerData,
+    trackRms,
+    outputMeter,
   } = useAudioEngine();
 
   const containerARef = useRef<HTMLDivElement>(null);
@@ -48,63 +75,56 @@ export default function App() {
     if (containerARef.current && containerBRef.current) {
       initEngine(containerARef.current, containerBRef.current);
     }
-  }, []);
+  }, [initEngine]);
 
   // --- Load Files into WaveSurfer ---
   useEffect(() => {
-    if (trackAFile && wsARef.current) {
-      wsARef.current.load(URL.createObjectURL(trackAFile));
+    if (trackAFile) {
+      loadTrack('A', trackAFile);
     }
-  }, [trackAFile]);
+  }, [loadTrack, trackAFile]);
 
   useEffect(() => {
-    if (trackBFile && wsBRef.current) {
-      wsBRef.current.load(URL.createObjectURL(trackBFile));
+    if (trackBFile) {
+      loadTrack('B', trackBFile);
     }
-  }, [trackBFile]);
+  }, [loadTrack, trackBFile]);
 
   // --- Sync Settings to Storage & Audio Engine ---
   useEffect(() => {
     localStorage.setItem('tm-trimA', trimA.toString());
     localStorage.setItem('tm-trimB', trimB.toString());
     localStorage.setItem('tm-nudgeB', nudgeB.toString());
+    localStorage.setItem('tm-mode', mode);
+    localStorage.setItem('tm-isMono', isMono.toString());
+    localStorage.setItem('tm-invertA', invertA.toString());
+    localStorage.setItem('tm-invertB', invertB.toString());
+    localStorage.setItem('tm-matchLoudness', matchLoudness.toString());
+    localStorage.setItem('tm-blendAmount', blendAmount.toString());
+    localStorage.setItem('tm-isLooping', isLooping.toString());
+    localStorage.setItem('tm-loopStart', loopStart.toString());
+    localStorage.setItem('tm-loopEnd', loopEnd?.toString() ?? '');
 
-    if (nodesRef.current && audioCtxRef.current) {
-      const { gainA, gainB, monoGainA, monoGainB } = nodesRef.current;
-      const ctx = audioCtxRef.current;
-      const ramp = 0.015;
-
-      // Handle Mono Summing
-      const monoVal = isMono ? 0.707 : 1;
-      monoGainA.channelCount = isMono ? 1 : 2;
-      monoGainB.channelCount = isMono ? 1 : 2;
-      monoGainA.gain.setTargetAtTime(monoVal, ctx.currentTime, ramp);
-      monoGainB.gain.setTargetAtTime(monoVal, ctx.currentTime, ramp);
-
-      // Handle A/B Switching and Volume
-      if (activeTrack === 'A') {
-        gainA.gain.setTargetAtTime(volume * trimA, ctx.currentTime, ramp);
-        gainB.gain.setTargetAtTime(0, ctx.currentTime, ramp);
-      } else {
-        gainA.gain.setTargetAtTime(0, ctx.currentTime, ramp);
-        gainB.gain.setTargetAtTime(volume * trimB, ctx.currentTime, ramp);
-      }
-    }
-  }, [trimA, trimB, nudgeB, volume, activeTrack, isMono]);
+    configureComparator({
+      mode,
+      trimA,
+      trimB,
+      volume,
+      isMono,
+      invertA,
+      invertB,
+      matchLoudness,
+      blendAmount,
+      nudgeB,
+      isLooping,
+      loopStart,
+      loopEnd,
+    });
+  }, [blendAmount, configureComparator, invertA, invertB, isLooping, isMono, loopEnd, loopStart, matchLoudness, mode, nudgeB, trimA, trimB, volume]);
 
   // --- Handle Playback Toggle ---
   const handleTogglePlay = () => {
-    if (!wsARef.current || !wsBRef.current) return;
-    if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume();
-
-    if (isPlaying) {
-      wsARef.current.pause();
-      wsBRef.current.pause();
-    } else {
-      wsARef.current.play();
-      wsBRef.current.play();
-    }
-    setIsPlaying(!isPlaying);
+    togglePlayback();
   };
 
   return (
@@ -132,8 +152,15 @@ export default function App() {
           <Display 
             containerARef={containerARef} 
             containerBRef={containerBRef} 
-            activeTrack={activeTrack} 
+            activeTrack={mode} 
             analyzerData={analyzerData} 
+            loopStart={isLooping ? loopStart : null}
+            loopEnd={isLooping ? loopEnd : null}
+            isMono={isMono}
+            invertA={invertA}
+            invertB={invertB}
+            matchLoudness={matchLoudness}
+            outputMeter={outputMeter}
           />
 
           {/* Control Grid */}
@@ -172,17 +199,119 @@ export default function App() {
 
               <div className="flex bg-zinc-950 p-2 rounded border border-zinc-900 gap-2 w-full mt-8">
                 <button 
-                  onClick={() => setActiveTrack('A')} 
-                  className={`flex-1 py-4 font-black text-sm rounded border-b-4 transition-all ${activeTrack === 'A' ? 'bg-amber-500 border-amber-700 text-black shadow-[0_0_20px_rgba(245,158,11,0.3)]' : 'bg-zinc-800 border-zinc-900 text-zinc-500 hover:bg-zinc-700'}`}
+                  onClick={() => setMode('A')} 
+                  className={`flex-1 py-4 font-black text-sm rounded border-b-4 transition-all ${mode === 'A' ? 'bg-amber-500 border-amber-700 text-black shadow-[0_0_20px_rgba(245,158,11,0.3)]' : 'bg-zinc-800 border-zinc-900 text-zinc-500 hover:bg-zinc-700'}`}
                 >
                   SOURCE MIX
                 </button>
                 <button 
-                  onClick={() => setActiveTrack('B')} 
-                  className={`flex-1 py-4 font-black text-sm rounded border-b-4 transition-all ${activeTrack === 'B' ? 'bg-emerald-500 border-emerald-700 text-black shadow-[0_0_20px_rgba(16,185,129,0.3)]' : 'bg-zinc-800 border-zinc-900 text-zinc-500 hover:bg-zinc-700'}`}
+                  onClick={() => setMode('B')} 
+                  className={`flex-1 py-4 font-black text-sm rounded border-b-4 transition-all ${mode === 'B' ? 'bg-emerald-500 border-emerald-700 text-black shadow-[0_0_20px_rgba(16,185,129,0.3)]' : 'bg-zinc-800 border-zinc-900 text-zinc-500 hover:bg-zinc-700'}`}
                 >
                   MASTERED
                 </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 w-full mt-4">
+                <button
+                  onClick={() => setMode('blend')}
+                  className={`py-3 rounded border-b-4 text-[10px] font-black uppercase transition-all ${mode === 'blend' ? 'bg-cyan-500 border-cyan-700 text-black' : 'bg-zinc-900 border-zinc-950 text-zinc-500 hover:text-zinc-200'}`}
+                >
+                  Blend
+                </button>
+                <button
+                  onClick={() => setMode('diff')}
+                  className={`py-3 rounded border-b-4 text-[10px] font-black uppercase transition-all ${mode === 'diff' ? 'bg-red-500 border-red-700 text-black' : 'bg-zinc-900 border-zinc-950 text-zinc-500 hover:text-zinc-200'}`}
+                >
+                  Difference
+                </button>
+              </div>
+
+              <div className="w-full mt-4 bg-zinc-950/80 p-3 border border-zinc-900 rounded">
+                <div className="flex justify-between text-[9px] font-black uppercase tracking-widest text-zinc-600 mb-2">
+                  <span>A</span><span>Blend Crossfader</span><span>B</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={blendAmount}
+                  onChange={(event) => setBlendAmount(Number(event.target.value))}
+                  className="w-full accent-cyan-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 w-full mt-4">
+                <button
+                  onClick={() => setMatchLoudness(!matchLoudness)}
+                  className={`py-3 rounded border text-[9px] font-black uppercase transition-all ${matchLoudness ? 'border-cyan-500 text-cyan-400 bg-cyan-500/10' : 'border-zinc-800 text-zinc-600 bg-zinc-900'}`}
+                  title={`A RMS ${trackRms.A?.toFixed(4) ?? 'pending'} / B RMS ${trackRms.B?.toFixed(4) ?? 'pending'}`}
+                >
+                  Match Loudness
+                </button>
+                <button
+                  onClick={() => setInvertA(!invertA)}
+                  className={`py-3 rounded border text-[9px] font-black uppercase transition-all ${invertA ? 'border-amber-500 text-amber-400 bg-amber-500/10' : 'border-zinc-800 text-zinc-600 bg-zinc-900'}`}
+                >
+                  Invert A
+                </button>
+                <button
+                  onClick={() => setInvertB(!invertB)}
+                  className={`py-3 rounded border text-[9px] font-black uppercase transition-all ${invertB ? 'border-emerald-500 text-emerald-400 bg-emerald-500/10' : 'border-zinc-800 text-zinc-600 bg-zinc-900'}`}
+                >
+                  Invert B
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 w-full mt-4 bg-zinc-950/80 p-3 border border-zinc-900 rounded">
+                <label className="flex flex-col gap-1 text-[9px] font-black uppercase text-zinc-600">
+                  Loop Start
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={loopStart}
+                    onChange={(event) => setLoopStart(Math.max(0, Number(event.target.value)))}
+                    className="bg-black border border-zinc-800 rounded px-2 py-2 text-xs font-mono text-zinc-300"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-[9px] font-black uppercase text-zinc-600">
+                  Loop End
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={loopEnd ?? ''}
+                    placeholder="End"
+                    onChange={(event) => setLoopEnd(event.target.value === '' ? null : Math.max(0, Number(event.target.value)))}
+                    className="bg-black border border-zinc-800 rounded px-2 py-2 text-xs font-mono text-zinc-300"
+                  />
+                </label>
+                <div className="col-span-2">
+                  <div className="flex justify-between text-[9px] font-black uppercase tracking-widest text-zinc-600 mb-2">
+                    <span>Loop Range</span>
+                    <span>{loopStart.toFixed(1)}s - {loopEnd === null ? 'end' : `${loopEnd.toFixed(1)}s`}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max={Math.max(10, loopEnd ?? 10)}
+                    step="0.1"
+                    value={loopStart}
+                    onChange={(event) => setLoopStart(Math.max(0, Number(event.target.value)))}
+                    className="w-full accent-cyan-500"
+                  />
+                  <input
+                    type="range"
+                    min={loopStart}
+                    max={Math.max(10, loopEnd ?? 10)}
+                    step="0.1"
+                    value={loopEnd ?? Math.max(10, loopStart)}
+                    onChange={(event) => setLoopEnd(Math.max(loopStart, Number(event.target.value)))}
+                    className="w-full accent-cyan-300 mt-2"
+                  />
+                </div>
               </div>
             </div>
 
